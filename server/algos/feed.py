@@ -1,38 +1,44 @@
+# server/feed.py
+
 from datetime import datetime
 from typing import Optional
 
 from server import config
 from server.database import Post
 
+# Bluesky will look here for your feed URI
 uri = config.FEED_URI
 CURSOR_EOF = 'eof'
 
 
 def handler(cursor: Optional[str], limit: int) -> dict:
-    posts = Post.select().order_by(Post.cid.desc()).order_by(Post.indexed_at.desc()).limit(limit)
+    # 1) Base query: newest posts first
+    base_q = Post.select() \
+                 .order_by(Post.indexed_at.desc(), Post.cid.desc())
 
-    if cursor:
-        if cursor == CURSOR_EOF:
-            return {
-                'cursor': CURSOR_EOF,
-                'feed': []
-            }
-        cursor_parts = cursor.split('::')
-        if len(cursor_parts) != 2:
-            raise ValueError('Malformed cursor')
+    # 2) Apply cursor if given
+    if cursor and cursor != CURSOR_EOF:
+        ts_str, cid = cursor.split("::", 1)
+        ts = datetime.fromtimestamp(int(ts_str) / 1000)
+        base_q = base_q.where(
+            ((Post.indexed_at == ts) & (Post.cid < cid)) |
+            (Post.indexed_at < ts)
+        )
 
-        indexed_at, cid = cursor_parts
-        indexed_at = datetime.fromtimestamp(int(indexed_at) / 1000)
-        posts = posts.where(((Post.indexed_at == indexed_at) & (Post.cid < cid)) | (Post.indexed_at < indexed_at))
+    # 3) Fetch exactly `limit` posts
+    items = list(base_q.limit(limit))
 
-    feed = [{'post': post.uri} for post in posts]
+    # 4) Build the feed payload
+    feed = [{"post": p.uri} for p in items]
 
-    cursor = CURSOR_EOF
-    last_post = posts[-1] if posts else None
-    if last_post:
-        cursor = f'{int(last_post.indexed_at.timestamp() * 1000)}::{last_post.cid}'
+    # 5) Determine next cursor
+    if len(items) == limit:
+        last = items[-1]
+        next_cursor = f"{int(last.indexed_at.timestamp() * 1000)}::{last.cid}"
+    else:
+        next_cursor = CURSOR_EOF
 
     return {
-        'cursor': cursor,
-        'feed': feed
+        "cursor": next_cursor,
+        "feed":   feed,
     }

@@ -1,14 +1,19 @@
 import sys
 import signal
 import threading
+import os
+import traceback
+import json
 
-from server import config
-from server import data_stream
-
+from dotenv import load_dotenv
+from atproto import Client
 from flask import Flask, jsonify, request
 
-from server.algos import algos
+from server import config, data_stream
 from server.data_filter import operations_callback
+from server.algos import algos
+from server.algos.feed import handler as skeleton_handler
+
 
 app = Flask(__name__)
 
@@ -88,3 +93,54 @@ def get_feed_skeleton():
         return 'Malformed cursor', 400
 
     return jsonify(body)
+
+@app.route('/detailed_feed.json', methods=['GET'])
+def detailed_feed():
+    # Make sure .env is loaded
+    load_dotenv()
+    try:
+        # 1) Fetch skeleton
+        sk = skeleton_handler(cursor=None, limit=20)
+        uris = [item['post'] for item in sk['feed']]
+
+        # 2) Hydrate via ATProto
+        client = Client()
+        client.login(os.environ['HANDLE'], os.environ['PASSWORD'])
+        # supply the URIs inside a params dict
+        resp = client.app.bsky.feed.get_posts({"uris": uris})
+
+
+        # 3) Build JSON
+        posts = []
+        for p in resp.posts:
+            posts.append({
+                "uri": p.uri,
+                "author": {
+                    "did":         p.author.did,
+                    "handle":      p.author.handle,
+                    "display_name": p.author.display_name,
+                },
+                "record": {
+                    "createdAt": p.record.created_at,
+                    "text":      p.record.text,
+                    "embed":     p.record.embed.model_dump() if p.record.embed else None
+                }
+            })
+
+        return jsonify({
+            "cursor": sk["cursor"],
+            "posts":  posts
+        })
+
+    except Exception as e:
+        # Print stack trace to terminal
+        import traceback
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+
+        # Return JSON with error + traceback lines
+        return jsonify({
+            "error": str(e),
+            "trace": tb.splitlines()
+        }), 500
+
